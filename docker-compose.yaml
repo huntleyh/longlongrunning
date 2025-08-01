@@ -1,0 +1,20 @@
+# docker-compose.yaml
+version: '3.8'
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.29.0
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    ports:
+      - "8080:8080"    # HTTP
+      - "9901:9901"    # Admin interface
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      - http-waiter
+
+  http-waiter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8088:8080"
