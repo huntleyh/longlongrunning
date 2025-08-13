@@ -141,7 +141,8 @@ Edit `k8s-deployment.yaml` and update the image reference:
 
 ```yaml
 # Change this line in the http-waiter deployment:
-image: your-registry.azurecr.io/http-waiter:latest
+# FROM: image: acrhhdemo.azurecr.io/http-waiter:latest
+# TO:   image: your-registry.azurecr.io/http-waiter:latest
 ```
 
 ### Step 2: Configure Azure APIM Self-Hosted Gateway
@@ -153,16 +154,41 @@ image: your-registry.azurecr.io/http-waiter:latest
 3. Create a new gateway or select an existing one
 4. Copy the **Gateway Key** and **Configuration endpoint**
 
+#### Required Placeholder Replacements
+
+Before deploying, you must update these values in `k8s-deployment.yaml`:
+
+| Location | Current Placeholder | Replace With |
+|----------|-------------------|--------------|
+| `laptopgateway-env` ConfigMap | `config.service.endpoint: "apim-hh-demo1.configuration.azure-api.net"` | `config.service.endpoint: "your-apim-instance.configuration.azure-api.net"` |
+| `laptopgateway` deployment | `config.service.auth` value: `""` | Your actual gateway key from Azure Portal |
+| `http-waiter` deployment | `image: acrhhdemo.azurecr.io/http-waiter:latest` | `image: your-registry.azurecr.io/http-waiter:latest` |
+
 #### Update the Kubernetes Manifest
 
 Edit `k8s-deployment.yaml` and replace the placeholder values:
 
 ```yaml
-# In the apim-gateway deployment, replace:
-- name: AZURE_APIM_GATEWAY_KEY
+# In the laptopgateway-env ConfigMap, replace:
+config.service.endpoint: "your-apim-instance.configuration.azure-api.net"
+
+# In the laptopgateway deployment, replace the empty auth value:
+- name: config.service.auth
   value: "your-actual-gateway-key-here"
-- name: AZURE_APIM_GATEWAY_ENDPOINT
-  value: "your-apim-instance.management.azure-api.net"
+```
+
+**⚠️ Security Note:** For production deployments, use Kubernetes secrets instead of plain text values:
+
+```yaml
+# Create a secret first:
+kubectl create secret generic apim-gateway-secret --from-literal=gateway-key="your-actual-gateway-key-here"
+
+# Then reference it in the deployment:
+- name: config.service.auth
+  valueFrom:
+    secretKeyRef:
+      name: apim-gateway-secret
+      key: gateway-key
 ```
 
 ### Step 3: Connect to Your AKS Cluster
@@ -176,6 +202,22 @@ kubectl get nodes
 ```
 
 ### Step 4: Deploy to AKS
+
+#### Pre-Deployment Validation
+
+Before deploying, verify all placeholder values have been replaced:
+
+```powershell
+# Check that all placeholders are updated
+grep -n "acrhhdemo.azurecr.io\|apim-hh-demo1\|\"\"" k8s-deployment.yaml
+
+# If this command returns results, you still have placeholders to replace
+```
+
+**Expected Configuration Check:**
+- ✅ Container image should reference your registry (not `acrhhdemo.azurecr.io`)
+- ✅ APIM endpoint should reference your instance (not `apim-hh-demo1`)
+- ✅ Gateway auth should have a value (not empty `""`)
 
 #### Deploy All Resources
 
@@ -409,12 +451,22 @@ Internet → LoadBalancer → Envoy Proxy → HTTP Waiter
 - ✅ Check that all pods are running: `kubectl get pods`
 
 ### 3. **APIM Gateway Authentication Issues**
-**Symptom**: Gateway fails to connect to Azure APIM
+**Symptom**: Gateway fails to connect to Azure APIM, logs show authentication errors
 
 **Solutions**:
-- Verify the `config.service.auth` value in the deployment
-- Check the gateway configuration in Azure Portal
-- Ensure the gateway is properly registered
+- ✅ Verify the `config.service.auth` value is set (not empty `""`)
+- ✅ Ensure you're using the correct gateway key from Azure Portal
+- ✅ Check the `config.service.endpoint` uses `.configuration.azure-api.net` (not `.management.`)
+- ✅ Verify the gateway is properly registered in Azure Portal
+
+**Check Configuration**:
+```powershell
+# Verify the gateway configuration
+kubectl get configmap laptopgateway-env -o yaml
+
+# Check if auth value is set (should not be empty)
+kubectl get deployment laptopgateway -o yaml | grep -A 5 "config.service.auth"
+```
 
 ### 4. **Port Forwarding Issues**
 **Symptom**: Cannot connect to `localhost:8080`
