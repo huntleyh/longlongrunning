@@ -1,0 +1,259 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: listener_http
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: ingress_http
+                    stream_idle_timeout: 1800s
+                    route_config:
+                      name: local_route
+                      virtual_hosts:
+                        - name: backend
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: apim_gateway
+                                timeout: 1800s
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                    common_http_protocol_options:
+                      idle_timeout: 1800s
+      clusters:
+        - name: apim_gateway
+          type: STRICT_DNS
+          connect_timeout: 5s
+          lb_policy: ROUND_ROBIN
+          max_requests_per_connection: 0
+          upstream_connection_options:
+            tcp_keepalive:
+              keepalive_time:
+                value: 60
+              keepalive_interval:
+                value: 30
+              keepalive_probes:
+                value: 3
+          load_assignment:
+            cluster_name: apim_gateway
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: laptopgateway-live-traffic
+                          port_value: 80
+    admin:
+      access_log_path: /tmp/admin_access.log
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-waiter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-waiter
+  template:
+    metadata:
+      labels:
+        app: http-waiter
+    spec:
+      containers:
+        - name: http-waiter
+          image: acrhhdemo.azurecr.io/http-waiter:latest
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-waiter
+spec:
+  selector:
+    app: http-waiter
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy
+  template:
+    metadata:
+      labels:
+        app: envoy
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.29.0
+          args: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+          ports:
+            - containerPort: 8080
+            - containerPort: 9901
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+spec:
+  selector:
+    app: envoy
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: admin
+      protocol: TCP
+      port: 9901
+      targetPort: 9901
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: laptopgateway-env
+  labels:
+    app: laptopgateway
+data:
+  config.service.endpoint: "apim-hh-demo1.configuration.azure-api.net"
+  neighborhood.host: "laptopgateway-instance-discovery"
+  runtime.deployment.artifact.source: "Azure Portal"
+  runtime.deployment.mechanism: "YAML"
+  runtime.deployment.orchestrator.type: "Kubernetes"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: laptopgateway
+  labels:
+    app: laptopgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: laptopgateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app: laptopgateway
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: laptopgateway
+        image: mcr.microsoft.com/azure-api-management/gateway:v2
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: https
+          containerPort: 8081
+        - name: rate-limit-dc
+          protocol: UDP
+          containerPort: 4290
+        - name: dc-heartbeat
+          protocol: UDP
+          containerPort: 4291
+        readinessProbe:
+          httpGet:
+            path: /status-0123456789abcdef
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        env:
+        - name: config.service.auth
+          value: ""
+        - name: net.server.http.forwarded.proto.enabled
+          value: "true"
+        - name: net.client.http.call-timeout
+          value: "00:30:00"
+        - name: net.client.tcp.connection.timeouts.idle
+          value: "00:30:00"
+        envFrom:
+        - configMapRef:
+            name: laptopgateway-env
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: laptopgateway-live-traffic
+  labels:
+    app: laptopgateway
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: https
+    port: 443
+    targetPort: 8081
+  selector:
+    app: laptopgateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: laptopgateway-instance-discovery
+  labels:
+    app: laptopgateway
+  annotations:
+    azure.apim.kubernetes.io/notes: "Headless service being used for instance discovery of self-hosted gateway"
+spec:
+  clusterIP: None
+  type: ClusterIP
+  ports:
+  - name: rate-limit-discovery
+    port: 4290
+    targetPort: rate-limit-dc
+    protocol: UDP
+  - name: discovery-heartbeat
+    port: 4291
+    targetPort: dc-heartbeat
+    protocol: UDP
+  selector:
+    app: laptopgateway
